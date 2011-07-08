@@ -1,8 +1,6 @@
 package fd
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
 	"os"
 	"syscall"
@@ -10,28 +8,16 @@ import (
 )
 
 func Send(fd, sendfd int) os.Error {
-	fdlen := int(unsafe.Sizeof(sendfd))
+	cmsglen := cmsgLen(int(unsafe.Sizeof(sendfd)))
 
-	var cmsg syscall.Cmsghdr
+	buf := make([]byte, cmsglen)
+	cmsg := (*syscall.Cmsghdr)(unsafe.Pointer(&buf[0]))
 	cmsg.Level = syscall.SOL_SOCKET
 	cmsg.Type = syscall.SCM_RIGHTS
-	cmsg.SetLen(cmsgLen(fdlen))
+	cmsg.SetLen(cmsglen)
+	*(*int)(unsafe.Pointer(&buf[cmsgLen(0)])) = sendfd
 
-	end := endianess()
-
-	cmsgbuf := bytes.NewBuffer(make([]byte, 0, cmsgLen(0)))
-	err := binary.Write(cmsgbuf, end, &cmsg)
-	if err != nil {
-		return fmt.Errorf("fdpass: Send: %v", err)
-	}
-	sendfdbuf := bytes.NewBuffer(make([]byte, 0, fdlen))
-	err = binary.Write(sendfdbuf, end, uint32(sendfd))
-	if err != nil {
-		return fmt.Errorf("fdpass: Send: %v", err)
-	}
-	cmsgbuf.ReadFrom(sendfdbuf)
-
-	errno := syscall.Sendmsg(fd, nil, cmsgbuf.Bytes(), nil, 0)
+	errno := syscall.Sendmsg(fd, nil, buf, nil, 0)
 	if errno != 0 {
 		return fmt.Errorf("fdpass: Send: %v", os.Errno(errno))
 	}
@@ -45,14 +31,8 @@ func Receive(fd int) (int, os.Error) {
 	if errno != 0 {
 		return -1, fmt.Errorf("fdpass: Receive: %v", os.Errno(errno))
 	}
-	end := endianess()
 
-	var cmsg syscall.Cmsghdr
-	cmsgbuf := bytes.NewBuffer(buf[:cmsgLen(0)])
-	err := binary.Read(cmsgbuf, end, &cmsg)
-	if err != nil {
-		return -1, fmt.Errorf("fdpass: Receive: %v", err)
-	}
+	cmsg := (*syscall.Cmsghdr)(unsafe.Pointer(&buf[0]))
 	if uint64(cmsg.Len) != uint64(cmsglen) {
 		return -1, fmt.Errorf("fdpass: Receive: bad length %v", cmsg.Len)
 	}
@@ -63,14 +43,8 @@ func Receive(fd int) (int, os.Error) {
 		return -1, fmt.Errorf("fdpass: Receive: bad type %v", cmsg.Type)
 	}
 
-	var sendfd uint32
-	sendfdbuf := bytes.NewBuffer(buf[cmsgLen(0):cmsglen])
-	err = binary.Read(sendfdbuf, end, &sendfd)
-	if err != nil {
-		return -1, fmt.Errorf("fdpass: Receive: %v", err)
-	}
-
-	return int(sendfd), nil
+	sendfd := *(*int)(unsafe.Pointer(&buf[cmsgLen(0)]))
+	return sendfd, nil
 }
 
 func cmsgLen(l int) int {
@@ -81,12 +55,4 @@ func cmsgAlign(l int) int {
 	var dummy uint
 	size := int(unsafe.Sizeof(dummy))
 	return (l + size - 1) & ^(size - 1)
-}
-
-func endianess() binary.ByteOrder {
-	var one uint16 = 1
-	if *(*byte)(unsafe.Pointer(&one)) == 0 {
-		return binary.BigEndian
-	}
-	return binary.LittleEndian
 }
